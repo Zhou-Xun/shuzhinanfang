@@ -18,4 +18,4 @@ def xgboostTrain():
     return jsonify(messages=f'xgboost model trained successfully! rmse: {rmse}')
 
 if __name__ == '__main__':
-    app.run(port='8050', debug=True)
+    app.run(port='8000', debug=True)
