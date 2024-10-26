@@ -155,6 +155,11 @@ def train_model(df_model):
 
     model.save_model('./model/xgboost_model1026_day.json')
 
+    # 保存结果
+    output = pd.DataFrame(y_val)
+    output['预测回款时间'] = y_pred
+    output.to_csv("./trainData/训练_XGBoost回款时间_90天范围内_1026.csv", index=False)
+
     return rmse
 
 def predict_model(df_model):
