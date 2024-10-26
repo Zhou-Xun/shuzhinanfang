@@ -12,6 +12,9 @@ from sklearn.metrics import mean_squared_error
 from scipy.stats import pointbiserialr, spearmanr
 
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV
+
+from collections import Counter
 
 def read_clean_file(file):
     df = pd.read_csv(file, dtype={'订单首次配足款时间': str, '末次生效时间': str})
@@ -49,12 +52,13 @@ def read_clean_file(file):
     # 使用drop方法丢弃指定的列
     df_cleaned = df_cleaned.drop(columns=columns_to_drop)
     df_cleaned = df_cleaned[df_cleaned['回款时间'] <= 90]
-    df_cleaned.to_csv("./trainData/cleaned_day.csv", index=False)
+    # 重新调整index
+    df_cleaned.reset_index(drop=True, inplace=True)
     return df_cleaned
 
 def preprocess_data(df_cleaned):
     # 指定需要归一化的列
-    df_cleaned = pd.read_csv("./trainData/cleaned_day.csv")
+    # df_cleaned = pd.read_csv("./trainData/cleaned_day.csv")
 
     columns_to_normalize = ['订货量', '订单价格(含税）', '总重量', '总金额(含税)'
         , '本客户的平均回款天数:本客户的所有订单sum（订单首次配足款时间-合同强制生效时间）/订单数'
@@ -95,45 +99,103 @@ def preprocess_data(df_cleaned):
 
     standarded_df[columns_to_category] = standarded_df[columns_to_category].astype('category')
     df_model = standarded_df.drop(columns=['最早交货月', '订单交货月'])
+
+    # 计算每个条目的出现次数
+    item_counts = df_model['客户代码（需方）'].value_counts()
+
+    # 筛选出现次数不少于5次的条目
+    items_to_keep = item_counts[item_counts >= 5].index
+
+    # 应用筛选条件，只保留column_name中条目出现次数不少于5次的行
+    df_model = df_model[df_model['客户代码（需方）'].isin(items_to_keep)]
+
     return df_model
 
 def train_model(df_model):
     X = df_model.drop(columns=['回款时间', '订单号'])
     y = df_model[['回款时间', '订单号']]
-    # 划分训练集和测试集
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    # 将数据转换为DMatrix格式，这是XGBoost的输入格式
-    dtrain = xgb.DMatrix(X_train, label=y_train['回款时间'], enable_categorical=True)
-    dtest = xgb.DMatrix(X_test, label=y_test['回款时间'], enable_categorical=True)
+    # 划分训练集和验证集
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+    # # 将数据转换为DMatrix格式，这是XGBoost的输入格式
+    # dtrain = xgb.DMatrix(X_train, label=y_train['回款时间'], enable_categorical=True)
+    # dval = xgb.DMatrix(X_val, label=y_val['回款时间'], enable_categorical=True)
+    #
+    # # 设置XGBoost参数（回归问题）
+    # params = {
+    #     'booster': 'gbtree',
+    #     'objective': 'reg:squarederror',  # 回归问题使用平方误差损失
+    #     'eta': 0.1,  # 学习率
+    #     'max_depth': 6,  # 树的最大深度
+    #     'eval_metric': 'rmse'  # 评估指标使用均方根误差
+    # }
+    #
+    # watchlist = [(dtrain, 'train'), (dval, 'val')]
+    #
+    # # 训练模型
+    # num_round = 800  # 迭代次数
+    # bst = xgb.train(params, dtrain, num_round, evals=watchlist, early_stopping_rounds=10)
+    #
+    # bst.save_model('./model/xgboost_model1017_day.json')
+    # # 预测
+    # y_pred = bst.predict(dval)
 
-    # 设置XGBoost参数（回归问题）
-    params = {
-        'booster': 'gbtree',
-        'objective': 'reg:squarederror',  # 回归问题使用平方误差损失
-        'eta': 0.1,  # 学习率
-        'max_depth': 6,  # 树的最大深度
-        'eval_metric': 'rmse'  # 评估指标使用均方根误差
-    }
+    other_params = {'learning_rate': 0.05, 'n_estimators': 800, 'max_depth': 5, 'min_child_weight': 10, 'seed': 0
+        , 'subsample': 0.8, 'colsample_bytree': 0.66, 'colsample_bylevel': 0.66, 'colsample_bynode': 0.66
+        , 'gamma': 2620, 'reg_alpha': 0, 'reg_lambda': 1}
 
-    # 训练模型
-    num_round = 2000  # 迭代次数
-    bst = xgb.train(params, dtrain, num_round)
+    model = xgb.XGBRegressor(objective='reg:squarederror', eval_metric='rmse'
+                             , enable_categorical=True, **other_params)
+    model.fit(X_train, y_train['回款时间'])
 
-    bst.save_model('./model/xgboost_model1017_day.json')
     # 预测
-    y_pred = bst.predict(dtest)
+    y_pred = model.predict(X_val)
 
     # 计算均方根误差（RMSE）
-    rmse = np.sqrt(mean_squared_error(y_test['回款时间'], y_pred))
+    rmse = np.sqrt(mean_squared_error(y_val['回款时间'], y_pred))
+
+    model.save_model('./model/xgboost_model1026_day.json')
+
+    return rmse
+
+def predict_model(df_model):
+    train_data = pd.read_csv("./trainData/train_data_latest.csv")
+    customer_list = list(df_model['客户代码（需方）']) + list(train_data['客户代码（需方）'])
+    # 使用Counter计算每个元素的出现频次
+    count = Counter(customer_list)
+    # 筛选出出现次数大于等于5的元素
+    result = [item for item, freq in count.items() if freq >= 6]
+    # 应用筛选条件，只保留column_name中条目出现次数不少于5次的行
+    df_model = df_model[df_model['客户代码（需方）'].isin(result)]
+
+    X = df_model.drop(columns=['回款时间', '订单号'])
+    y = df_model[['回款时间', '订单号']]
+
+    model = xgb.Booster()
+    model.load_model('./model/xgboost_model1026_day.json')
+
+    dtest = xgb.DMatrix(X, label=y['回款时间'], enable_categorical=True)
+    y_pred = model.predict(dtest)
+
+    rmse = np.sqrt(mean_squared_error(y['回款时间'], y_pred))
+
+    # 保存结果
+    output = pd.DataFrame(y)
+    output['预测回款时间'] = y_pred
+    output.to_csv("./testData/预测_XGBoost回款时间_90天范围内_1026.csv", index=False)
+
     return rmse
 
 def build_XGBoost():
-    read_clean_file("./trainData/回款时间原数据1014.csv")
-    # 我很困惑必须重新读取
-    df_cleaned = pd.read_csv("./trainData/cleaned_day.csv")
-
+    df_cleaned = read_clean_file("./trainData/回款时间原数据1014.csv")
     df_model = preprocess_data(df_cleaned)
+    df_model.to_csv("./trainData/train_data_latest.csv", index=False)
     rmse = train_model(df_model)
+    return rmse
+
+def test_XGBoost():
+    df_cleaned = read_clean_file("./testData/回款时间数据1024.csv")
+    df_model = preprocess_data(df_cleaned)
+    rmse = predict_model(df_model)
     return rmse
 
 
